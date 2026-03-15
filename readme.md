@@ -49,16 +49,11 @@ No package install is needed.
 
 ### Basic run
 
-Linux / macOS
+Python is the interpreter.  You may need to use either just python or python3.  Depends on how your environment is setup.
 
+At minimum:
 ```
 python readcsv.py --csv finalAlertData.csv
-```
-
-Windows PowerShell
-
-```
-python .\readcsv.py --csv .\finalAlertData.csv
 ```
 
 ### Using the OpsGenie zip export
