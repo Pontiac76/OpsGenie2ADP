@@ -163,15 +163,16 @@ def parse_args() -> argparse.Namespace:
 		description="Convert OpsGenie CSV pages into ADP-friendly per-day text.",
 		epilog=(
 			"Examples:\n"
-			"  python opsgenie_to_adp.py --csv finalAlertData.csv\n"
-			"  python opsgenie_to_adp.py --zip finalAlertData.zip\n"
-			"  python opsgenie_to_adp.py --zip finalAlertData.zip --tinyid 6000,6005,6012\n"
-			"  python opsgenie_to_adp.py --zip finalAlertData.zip --settime 6011=1.25,6010=1:15\n"
-			"  python opsgenie_to_adp.py --zip finalAlertData.zip --tinyid 6005 --settime 6005=1.75\n"
-			"  python opsgenie_to_adp.py --zip finalAlertData.zip --out /tmp/adp.txt\n"
+			"  python readcsv.py --csv finalAlertData.csv\n"
+			"  python readcsv.py --zip finalAlertData.zip\n"
+			"  python readcsv.py --zip finalAlertData.zip --tinyid 6000,6005,6012\n"
+			"  python readcsv.py --zip finalAlertData.zip --settime 6011=1.25,6010=1:15\n"
+			"  python readcsv.py --zip finalAlertData.zip --tinyid 6005 --settime 6005=1.75\n"
+			"  python readcsv.py --zip finalAlertData.zip --out /tmp/adp.txt\n"
 			"\n"
 			"Notes:\n"
 			"  --tinyid forces TinyID(s) into the payable report even if they overlap.\n"
+			"           tinyid is OpsGenies 'Primary Key' for this queue\n"
 			"  --settime accepts either HH:MM or decimal hours.\n"
 			"    1:15 = 1 hour 15 minutes\n"
 			"    1.25 = 1 hour 15 minutes\n"
@@ -441,7 +442,6 @@ def clear_screen():
 def main() -> int:
 	clear_screen()
 	args = parse_args()
-	include_dates = parse_date_set(args.include_date)
 	forced_ids = parse_tinyid_list(args.tinyid)
 	time_overrides = parse_time_overrides(args.settime)
 
@@ -449,7 +449,6 @@ def main() -> int:
 	zip_path = Path(args.zip_path) if args.zip_path else None
 
 	alerts = load_alerts(csv_path, zip_path, args.owner)
-	alerts = [a for a in alerts if is_payable(a, include_dates)]
 
 	if not alerts:
 		print("No payable alerts found after filtering.")
