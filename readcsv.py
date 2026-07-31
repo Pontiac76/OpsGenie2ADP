@@ -129,6 +129,9 @@ def render_full_report(alerts: List[Alert], blocks: List[PayBlock], forced_ids: 
 			if alert.tiny_id in forced_ids:
 				color = SUBMIT_COLOR
 				status = "FORCED "
+			elif not is_payable(alert, include_dates=set()):
+				color = OVERLAP_COLOR
+				status = "EXCLUDE"
 			elif alert.tiny_id in submit_ids:
 				color = SUBMIT_COLOR
 				status = "SUBMIT "
@@ -136,8 +139,9 @@ def render_full_report(alerts: List[Alert], blocks: List[PayBlock], forced_ids: 
 				color = OVERLAP_COLOR
 				status = "OVERLAP"
 
+			reason = " - business hours, not payable" if status == "EXCLUDE" else ""
 			lines.append(
-				f"{color}{status} | {alert.tiny_id} - {format_time(alert.created_at)}: {alert.message}{RESET_COLOR}"
+				f"{color}{status} | {alert.tiny_id} - {format_time(alert.created_at)}: {alert.message}{reason}{RESET_COLOR}"
 			)
 
 		lines.append("")
@@ -397,7 +401,7 @@ def parse_duration_to_minutes(text: str) -> int:
 	total = (hours * 60) + minutes
 	return round_duration_minutes(total)
 
-def render_output(blocks: List[PayBlock]) -> str:
+def render_output(blocks: List[PayBlock], all_alerts: List[Alert]) -> str:
 	if not blocks:
 		return "No payable blocks selected."
 
@@ -412,11 +416,30 @@ def render_output(blocks: List[PayBlock]) -> str:
 	lines.append(f"Period End:   {period_end}")
 	lines.append("")
 
-	for day_date in sorted(grouped.keys()):
-		day_blocks = grouped[day_date]
+	first_date = min(alert.created_at.date() for alert in all_alerts)
+	last_date = max(alert.created_at.date() for alert in all_alerts)
+	while last_date.weekday() != 4:
+		last_date += timedelta(days=1)
+
+	all_days = set(grouped.keys())
+	current_date = first_date
+	first_friday_seen = False
+	standby_fridays = set()
+	while current_date <= last_date:
+		if current_date.weekday() == 4:
+			if first_friday_seen:
+				standby_fridays.add(current_date)
+			else:
+				first_friday_seen = True
+		current_date += timedelta(days=1)
+
+	all_days.update(standby_fridays)
+
+	for day_date in sorted(all_days):
+		day_blocks = grouped.get(day_date, [])
 		lines.append("------------------------")
 
-		lines.append(f"{day_blocks[0].anchor.created_at.strftime('%a %m-%d')}")
+		lines.append(f"{day_date.strftime('%a %m-%d')}")
 
 		day_total_minutes = 0
 
@@ -427,11 +450,13 @@ def render_output(blocks: List[PayBlock]) -> str:
 			)
 			day_total_minutes += block.duration_minutes
 
+		if day_date in standby_fridays:
+			lines.append("ON CALL STANDBY WEEKLY : 1 Hour")
+			day_total_minutes += 60
+
 		total_text = f"{day_total_minutes // 60}:{day_total_minutes % 60:02d}"
 		lines.append(f"\tDay Total: {total_text}")
 		lines.append("")
-	lines.append("------------------------")
-	lines.append("ON CALL STANDBY WEEKLY : 1 Hour")
 	lines.append("------------------------")
 
 	return "\n".join(lines).rstrip() + "\n"
@@ -449,18 +474,22 @@ def main() -> int:
 	zip_path = Path(args.zip_path) if args.zip_path else None
 
 	alerts = load_alerts(csv_path, zip_path, args.owner)
+	payable_alerts = [
+		alert for alert in alerts
+		if is_payable(alert, include_dates=set()) or alert.tiny_id in forced_ids
+	]
 
 	if not alerts:
-		print("No payable alerts found after filtering.")
+		print("No alerts found after filtering.")
 		return 0
 
-	period_start, period_end = get_oncall_window(alerts[0].created_at)
+	period_start, period_end = get_oncall_window(payable_alerts[0].created_at if payable_alerts else alerts[0].created_at)
 	print(f"On-call period: {period_start} -> {period_end}")
 
-	blocks = build_default_pay_blocks(alerts, forced_ids, time_overrides, default_minutes=60)
+	blocks = build_default_pay_blocks(payable_alerts, forced_ids, time_overrides, default_minutes=60)
 
 	full_report = render_full_report(alerts, blocks, forced_ids)
-	output = render_output(blocks)
+	output = render_output(blocks, alerts)
 
 	print("\n===== FULL REPORT =====\n")
 	print(full_report)
