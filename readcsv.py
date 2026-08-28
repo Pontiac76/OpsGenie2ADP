@@ -162,6 +162,24 @@ def get_oncall_window(reference_dt: datetime) -> tuple[str, str]:
 
 	return start_date.strftime("%d/%m/%Y"), end_date.strftime("%d/%m/%Y")
 
+
+def get_oncall_window_multi(reference_dt: datetime, last_dt: datetime) -> tuple[str, str]:
+	"""Calculate the on-call period spanning from the Friday of or before the first alert
+	to the Friday of or after the last alert."""
+
+	# Start: Friday of or before the first alert
+	days_back = (reference_dt.weekday() - 4) % 7
+	start_date = (reference_dt - timedelta(days=days_back)).date()
+
+	if reference_dt.weekday() == 4 and reference_dt.time() < time(17, 0):
+		start_date = start_date - timedelta(days=7)
+
+	# End: Friday of or after the last alert
+	days_forward = (4 - last_dt.weekday()) % 7
+	end_date = (last_dt + timedelta(days=days_forward)).date()
+
+	return start_date.strftime("%d/%m/%Y"), end_date.strftime("%d/%m/%Y")
+
 def parse_args() -> argparse.Namespace:
 	parser = argparse.ArgumentParser(
 		description="Convert OpsGenie CSV pages into ADP-friendly per-day text.",
@@ -169,10 +187,11 @@ def parse_args() -> argparse.Namespace:
 			"Examples:\n"
 			"  python readcsv.py --csv finalAlertData.csv\n"
 			"  python readcsv.py --zip finalAlertData.zip\n"
-			"  python readcsv.py --zip finalAlertData.zip --tinyid 6000,6005,6012\n"
-			"  python readcsv.py --zip finalAlertData.zip --settime 6011=1.25,6010=1:15\n"
-			"  python readcsv.py --zip finalAlertData.zip --tinyid 6005 --settime 6005=1.75\n"
-			"  python readcsv.py --zip finalAlertData.zip --out /tmp/adp.txt\n"
+			"  python readcsv.py --auto\n"
+			"  python readcsv.py --auto --tinyid 6000,6005,6012\n"
+			"  python readcsv.py --auto --settime 6011=1.25,6010=1:15\n"
+			"  python readcsv.py --auto --out /tmp/adp.txt\n"
+			"  python readcsv.py --auto --cleanup\n"
 			"\n"
 			"Notes:\n"
 			"  --tinyid forces TinyID(s) into the payable report even if they overlap.\n"
@@ -191,7 +210,7 @@ def parse_args() -> argparse.Namespace:
 		formatter_class=argparse.RawTextHelpFormatter,
 	)
 
-	source_group = parser.add_mutually_exclusive_group(required=True)
+	source_group = parser.add_mutually_exclusive_group(required=False)
 	source_group.add_argument(
 		"--csv",
 		help="Path to OpsGenie CSV export.",
@@ -200,6 +219,11 @@ def parse_args() -> argparse.Namespace:
 		"--zip",
 		dest="zip_path",
 		help="Path to OpsGenie zip export containing exactly one CSV.",
+	)
+	source_group.add_argument(
+		"--auto",
+		action="store_true",
+		help="Auto-detect the youngest alert-export-result_*.zip in the current directory and process it.",
 	)
 
 	parser.add_argument(
@@ -227,6 +251,12 @@ def parse_args() -> argparse.Namespace:
 			"  decimal hours  1.75 = 1 hour 45 minutes\n"
 			"  whole hours    2 = 2 hours"
 		),
+	)
+
+	parser.add_argument(
+		"--cleanup",
+		action="store_true",
+		help="Delete all but the youngest alert-export-result_*.zip file.",
 	)
 
 	return parser.parse_args()
@@ -409,7 +439,9 @@ def render_output(blocks: List[PayBlock], all_alerts: List[Alert]) -> str:
 	for block in blocks:
 		grouped[block.anchor.created_at.date()].append(block)
 
-	period_start, period_end = get_oncall_window(blocks[0].anchor.created_at)
+	first_alert = min(all_alerts, key=lambda a: a.created_at)
+	last_alert = max(all_alerts, key=lambda a: a.created_at)
+	period_start, period_end = get_oncall_window_multi(first_alert.created_at, last_alert.created_at)
 
 	lines = []
 	lines.append(f"Period Start: {period_start}")
@@ -464,6 +496,57 @@ def render_output(blocks: List[PayBlock], all_alerts: List[Alert]) -> str:
 def clear_screen():
 	os.system("cls" if os.name == "nt" else "clear")
 
+def find_youngest_auto_zip() -> Optional[Path]:
+	"""Find the youngest alert-export-result_*.zip in the current directory or downloads/ subdirectory."""
+	candidates: list[Path] = []
+
+	# Check current directory first
+	for z in Path.cwd().glob("alert-export-result_*.zip"):
+		candidates.append(z)
+
+	# Then check downloads/ subdirectory
+	downloads = Path.cwd() / "downloads"
+	if downloads.is_dir():
+		for z in downloads.glob("alert-export-result_*.zip"):
+			candidates.append(z)
+
+	if not candidates:
+		return None
+
+	youngest = max(candidates, key=lambda p: p.stat().st_mtime)
+	return youngest
+
+
+def cleanup_old_zips() -> list[Path]:
+	"""Delete all but the youngest alert-export-result_*.zip file. Returns the list of deleted files."""
+	candidates: list[Path] = []
+
+	# Check current directory first
+	for z in Path.cwd().glob("alert-export-result_*.zip"):
+		candidates.append(z)
+
+	# Then check downloads/ subdirectory
+	downloads = Path.cwd() / "downloads"
+	if downloads.is_dir():
+		for z in downloads.glob("alert-export-result_*.zip"):
+			candidates.append(z)
+
+	# Nothing to do
+	if len(candidates) <= 1:
+		return []
+
+	# Sort by modification time, youngest first
+	candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+	youngest = candidates[0]
+
+	# Delete all except the youngest
+	deleted: list[Path] = []
+	for old_zip in candidates[1:]:
+		old_zip.unlink()
+		deleted.append(old_zip)
+
+	return deleted
+
 def main() -> int:
 	clear_screen()
 	args = parse_args()
@@ -472,6 +555,24 @@ def main() -> int:
 
 	csv_path = Path(args.csv) if args.csv else None
 	zip_path = Path(args.zip_path) if args.zip_path else None
+
+	if args.auto:
+		zip_path = find_youngest_auto_zip()
+		if zip_path is None:
+			print("Cannot find the latest alert-export-result_*.zip file")
+			return 1
+		print(f"Auto-detected: {zip_path}")
+
+	deleted_zips: list[Path] = []
+	if args.cleanup:
+		deleted_zips = cleanup_old_zips()
+
+	if not csv_path and not zip_path:
+		if deleted_zips:
+			print("\n===== CLEANUP =====")
+			for z in deleted_zips:
+				print(f"Deleted: {z}")
+		return 0
 
 	alerts = load_alerts(csv_path, zip_path, args.owner)
 	payable_alerts = [
@@ -483,7 +584,9 @@ def main() -> int:
 		print("No alerts found after filtering.")
 		return 0
 
-	period_start, period_end = get_oncall_window(payable_alerts[0].created_at if payable_alerts else alerts[0].created_at)
+	first_alert = min(alerts, key=lambda a: a.created_at)
+	last_alert = max(alerts, key=lambda a: a.created_at)
+	period_start, period_end = get_oncall_window_multi(first_alert.created_at, last_alert.created_at)
 	print(f"On-call period: {period_start} -> {period_end}")
 
 	blocks = build_default_pay_blocks(payable_alerts, forced_ids, time_overrides, default_minutes=60)
@@ -503,6 +606,32 @@ def main() -> int:
 		out_path = Path(args.out)
 		out_path.write_text(output, encoding="utf-8")
 		print(f"Saved output to: {out_path}")
+
+	if deleted_zips:
+		print("\n===== CLEANUP =====")
+		for z in deleted_zips:
+			print(f"Deleted: {z}")
+
+	# Suggest --cleanup if there are old zips and --cleanup wasn't used
+	if not args.cleanup and args.auto:
+		candidates: list[Path] = []
+		for z in Path.cwd().glob("alert-export-result_*.zip"):
+			candidates.append(z)
+		downloads = Path.cwd() / "downloads"
+		if downloads.is_dir():
+			for z in downloads.glob("alert-export-result_*.zip"):
+				candidates.append(z)
+		if len(candidates) > 1:
+			candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+			youngest = candidates[0]
+			now = datetime.now()
+			print("\nOld alert-export-result_*.zip files:")
+			for z in candidates[1:]:
+				mtime = datetime.fromtimestamp(z.stat().st_mtime)
+				age_days = (now - mtime).days
+				age_str = f" ({age_days} days old)" if age_days > 0 else ""
+				print(f"  {z.name}  [{mtime.strftime('%Y-%m-%d %H:%M:%S')}]  {age_str}")
+			print("Run with --cleanup to remove old reports.")
 
 	return 0
 
